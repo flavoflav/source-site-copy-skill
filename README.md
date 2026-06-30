@@ -64,6 +64,29 @@ If you're running outside a Nebula-created directory and Step 0 reports a missin
 
 The installer auto-detects your platform — macOS (Homebrew), Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman) — and falls back to `cargo` or `npm` for tools that aren't packaged everywhere. Tools already on `PATH` are skipped. After installing `agent-browser`, it runs `agent-browser install` once to fetch a Chrome-for-Testing build.
 
+#### Full list of what the installer covers
+
+|  # | Tool          | macOS (brew) | Debian/Ubuntu (apt)      | Fedora/RHEL (dnf)      | Arch (pacman)         | Fallback                       |
+|---:|---------------|--------------|--------------------------|------------------------|-----------------------|--------------------------------|
+|  1 | ast-grep      | ast-grep     | —                        | —                      | ast-grep              | `cargo install ast-grep`       |
+|  2 | difft         | difftastic   | difftastic               | difftastic             | difftastic            | `cargo install difftastic`     |
+|  3 | sd            | sd           | sd                       | —                      | sd                    | `cargo install sd`             |
+|  4 | comby         | comby        | —                        | —                      | —                     | manual binary release          |
+|  5 | scc           | scc          | —                        | —                      | scc                   | `go install …/scc/v3@latest`   |
+|  6 | yq            | yq           | yq                       | yq                     | go-yq                 | binary release                 |
+|  7 | shellcheck    | shellcheck   | shellcheck               | ShellCheck             | shellcheck            | manual                         |
+|  8 | hyperfine     | hyperfine    | hyperfine                | hyperfine              | hyperfine             | `cargo install hyperfine`      |
+|  9 | watchexec     | watchexec    | watchexec                | —                      | watchexec             | `cargo install watchexec-cli`  |
+| 10 | vips          | vips         | libvips-tools            | vips-tools             | libvips               | manual                         |
+| 11 | odiff         | odiff-bin    | —                        | —                      | —                     | `npm i -g odiff-bin`           |
+| 12 | aria2c        | aria2        | aria2                    | aria2                  | aria2                 | manual                         |
+| 13 | htmlq         | htmlq        | —                        | —                      | —                     | `cargo install htmlq`          |
+| 14 | exiftool      | exiftool     | libimage-exiftool-perl   | perl-Image-ExifTool    | perl-image-exiftool   | manual                         |
+| 15 | biome         | biome        | —                        | —                      | —                     | `npm i -g @biomejs/biome`      |
+| 16 | agent-browser | —            | —                        | —                      | —                     | `npm i -g agent-browser` + `agent-browser install` |
+
+A `—` means there's no native package on that platform; the installer uses the fallback in the last column. Run `./install.sh --list` to see the exact command the installer would run on your machine for each tool.
+
 ---
 
 ## Prerequisites
