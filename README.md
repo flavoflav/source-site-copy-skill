@@ -33,10 +33,10 @@ Editors can log in, edit a menu item, swap an image, change body copy, and see i
 
 ## Installation
 
-`site-copy`, `agent-browser`, and `local-power-tools` ship as `.skill` bundles (zip archives) in this repo's root.
+`site-copy` is meant to be run from inside a **Nebula-created local project directory**. The Nebula project scaffolding ships with every dependent Acquia Source authoring skill (`canvas-design-decomposition`, the full `canvas-component-*` suite, `acquia-source-canvas-pages`, the `nebula-*` skills, etc.) already installed — so the only thing you need to add is the three `.skill` bundles from this repo:
 
 ```bash
-# Unzip each into your Claude skills directory
+# From inside your Nebula-created project directory
 unzip -d ~/.claude/skills/ site-copy.skill
 unzip -d ~/.claude/skills/ agent-browser.skill
 unzip -d ~/.claude/skills/ local-power-tools.skill
@@ -49,15 +49,7 @@ ls ~/.claude/skills/site-copy/SKILL.md \
 
 All three are mandatory. `site-copy` halts at Step 0 if either of the other two is missing.
 
-### Sub-skills not bundled here
-
-`site-copy` also depends on a set of Acquia Source authoring skills that live in a separate library. Install them before running, or `site-copy` will stop at Step 0 and tell you which one is missing.
-
-**Both branches:** `canvas-design-decomposition`, `canvas-styling-conventions`, `frontend-design`, `implement-design`
-
-**Canvas branch (also):** `canvas-component-definition`, `canvas-component-metadata`, `canvas-component-composability`, `canvas-component-utils`, `canvas-page-definition`, `canvas-content-templates`, `canvas-navigation-components`, `acquia-source-navigation-menus`, `acquia-source-canvas-pages`, `canvas-data-fetching`, `canvas-workbench`, `canvas-component-push`
-
-**Nebula branch (also):** `nebula-project-structure`, `nebula-scrape-url`, `nebula-component-creation`, `nebula-component-validation`, `nebula-node-page-scaffold`, `nebula-workbench-pages`, `nebula-visual-verification`
+If you're running outside a Nebula-created directory and Step 0 reports a missing sub-skill, install that skill from the Acquia Source skill library before retrying.
 
 ---
 
@@ -70,7 +62,7 @@ The skill checks for each of these and stops if any are missing.
 1. **A Canvas or Nebula project** to work in (existing or freshly scaffolded — the skill won't initialize from nothing).
 2. **A clean git working tree.** The skill commits after every batch and refuses to start on dirty state. This is its only recovery path from a destructive sync command.
 3. **Source MCP connected** with these seven tools available: `create_media`, `create_canvas_page`, `batch_add_components_to_page`, `publish_canvas_page`, `create_menu`, `create_menu_item`, `publish_auto_saves`. Required for any Acquia Source target — there is no CLI fallback that works reliably.
-4. **The sub-skills loaded** alongside `site-copy` in your skill library — see [Installation → Sub-skills not bundled here](#sub-skills-not-bundled-here) for the full list.
+4. **Run from inside a Nebula-created local project directory** — the dependent Acquia Source authoring skills ship with that scaffolding. If you're not in a Nebula project, see [Installation](#installation) for the manual fallback.
 5. **The live site URL.** Publicly accessible, or accessible from wherever `agent-browser` is running.
 
 ### Highly recommended local tools
