@@ -56,10 +56,10 @@ If you're running outside a Nebula-created directory and Step 0 reports a missin
 `agent-browser` is a Node binary; `local-power-tools` is a curated set of CLIs (`ast-grep`, `difft`, `sd`, `comby`, `scc`, `yq`, `shellcheck`, `hyperfine`, `watchexec`, `vips`, `odiff`, `aria2c`, `htmlq`, `exiftool`, `biome`). The repo ships a universal installer that handles all of them:
 
 ```bash
-./install.sh             # install everything that's missing
-./install.sh --list      # show every tool and its current status
-./install.sh --dry-run   # print the commands without running them
-./install.sh --help      # all flags (--only, --skip, --yes, --no-agent-browser)
+./local-power-tools-install.sh             # install everything that's missing
+./local-power-tools-install.sh --list      # show every tool and its current status
+./local-power-tools-install.sh --dry-run   # print the commands without running them
+./local-power-tools-install.sh --help      # all flags (--only, --skip, --yes, --no-agent-browser)
 ```
 
 The installer auto-detects your platform — macOS (Homebrew), Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman) — and falls back to `cargo` or `npm` for tools that aren't packaged everywhere. Tools already on `PATH` are skipped. After installing `agent-browser`, it runs `agent-browser install` once to fetch a Chrome-for-Testing build.
@@ -85,7 +85,7 @@ The installer auto-detects your platform — macOS (Homebrew), Debian/Ubuntu (ap
 | 15 | biome         | biome        | —                        | —                      | —                     | `npm i -g @biomejs/biome`      |
 | 16 | agent-browser | —            | —                        | —                      | —                     | `npm i -g agent-browser` + `agent-browser install` |
 
-A `—` means there's no native package on that platform; the installer uses the fallback in the last column. Run `./install.sh --list` to see the exact command the installer would run on your machine for each tool.
+A `—` means there's no native package on that platform; the installer uses the fallback in the last column. Run `./local-power-tools-install.sh --list` to see the exact command the installer would run on your machine for each tool.
 
 ---
 

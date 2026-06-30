@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# install.sh — install agent-browser + the local-power-tools toolchain.
+# local-power-tools-install.sh — install agent-browser + the local-power-tools toolchain.
 #
 # Universal installer. Works on macOS (Homebrew), Debian/Ubuntu (apt),
 # Fedora/RHEL (dnf), and Arch (pacman). Falls back to cargo or npm for
 # tools that aren't packaged everywhere. Skips tools already on PATH.
 #
 # Usage:
-#   ./install.sh                     # install everything that's missing
-#   ./install.sh --list              # show every tool and its current status
-#   ./install.sh --dry-run           # print the commands without running them
-#   ./install.sh --only ast-grep,sd  # install only the listed tools
-#   ./install.sh --skip biome,vips   # install everything except the listed tools
-#   ./install.sh --no-agent-browser  # skip agent-browser (power tools only)
-#   ./install.sh --yes               # don't prompt before installing
-#   ./install.sh --help              # this message
+#   ./local-power-tools-install.sh                     # install everything that's missing
+#   ./local-power-tools-install.sh --list              # show every tool and its current status
+#   ./local-power-tools-install.sh --dry-run           # print the commands without running them
+#   ./local-power-tools-install.sh --only ast-grep,sd  # install only the listed tools
+#   ./local-power-tools-install.sh --skip biome,vips   # install everything except the listed tools
+#   ./local-power-tools-install.sh --no-agent-browser  # skip agent-browser (power tools only)
+#   ./local-power-tools-install.sh --yes               # don't prompt before installing
+#   ./local-power-tools-install.sh --help              # this message
 
 set -euo pipefail
 
