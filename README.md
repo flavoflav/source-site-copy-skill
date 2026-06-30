@@ -51,6 +51,19 @@ All three are mandatory. `site-copy` halts at Step 0 if either of the other two 
 
 If you're running outside a Nebula-created directory and Step 0 reports a missing sub-skill, install that skill from the Acquia Source skill library before retrying.
 
+### Install the underlying CLIs
+
+`agent-browser` is a Node binary; `local-power-tools` is a curated set of CLIs (`ast-grep`, `difft`, `sd`, `comby`, `scc`, `yq`, `shellcheck`, `hyperfine`, `watchexec`, `vips`, `odiff`, `aria2c`, `htmlq`, `exiftool`, `biome`). The repo ships a universal installer that handles all of them:
+
+```bash
+./install.sh             # install everything that's missing
+./install.sh --list      # show every tool and its current status
+./install.sh --dry-run   # print the commands without running them
+./install.sh --help      # all flags (--only, --skip, --yes, --no-agent-browser)
+```
+
+The installer auto-detects your platform — macOS (Homebrew), Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman) — and falls back to `cargo` or `npm` for tools that aren't packaged everywhere. Tools already on `PATH` are skipped. After installing `agent-browser`, it runs `agent-browser install` once to fetch a Chrome-for-Testing build.
+
 ---
 
 ## Prerequisites
