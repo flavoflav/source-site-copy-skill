@@ -78,14 +78,18 @@ The installer auto-detects your platform — macOS (Homebrew), Debian/Ubuntu (ap
 |  8 | hyperfine     | hyperfine    | hyperfine                | hyperfine              | hyperfine             | `cargo install hyperfine`      |
 |  9 | watchexec     | watchexec    | watchexec                | —                      | watchexec             | `cargo install watchexec-cli`  |
 | 10 | vips          | vips         | libvips-tools            | vips-tools             | libvips               | manual                         |
-| 11 | odiff         | odiff-bin    | —                        | —                      | —                     | `npm i -g odiff-bin`           |
-| 12 | aria2c        | aria2        | aria2                    | aria2                  | aria2                 | manual                         |
-| 13 | htmlq         | htmlq        | —                        | —                      | —                     | `cargo install htmlq`          |
-| 14 | exiftool      | exiftool     | libimage-exiftool-perl   | perl-Image-ExifTool    | perl-image-exiftool   | manual                         |
-| 15 | biome         | biome        | —                        | —                      | —                     | `npm i -g @biomejs/biome`      |
-| 16 | agent-browser | —            | —                        | —                      | —                     | `npm i -g agent-browser` + `agent-browser install` |
+| 11 | ffmpeg        | ffmpeg       | ffmpeg                   | ffmpeg                 | ffmpeg                | manual                         |
+| 12 | odiff         | odiff-bin    | —                        | —                      | —                     | `npm i -g odiff-bin`           |
+| 13 | aria2c        | aria2        | aria2                    | aria2                  | aria2                 | manual                         |
+| 14 | yt-dlp        | yt-dlp       | yt-dlp                   | yt-dlp                 | yt-dlp                | binary release                 |
+| 15 | htmlq         | htmlq        | —                        | —                      | —                     | `cargo install htmlq`          |
+| 16 | exiftool      | exiftool     | libimage-exiftool-perl   | perl-Image-ExifTool    | perl-image-exiftool   | manual                         |
+| 17 | biome         | biome        | —                        | —                      | —                     | `npm i -g @biomejs/biome`      |
+| 18 | agent-browser | —            | —                        | —                      | —                     | `npm i -g agent-browser` + `agent-browser install` |
 
 A `—` means there's no native package on that platform; the installer uses the fallback in the last column. Run `./local-power-tools-install.sh --list` to see the exact command the installer would run on your machine for each tool.
+
+**`ffmpeg` + `yt-dlp`** are the video pipeline. They don't discover videos themselves — `agent-browser` does that by executing the page's JavaScript and reading the resolved `<video>` `currentSrc` / `<source>` URLs (modern marketing pages render video tags in JS, so static HTML scrapes find nothing). Once `agent-browser` hands over a real video or HLS/DASH manifest URL, `yt-dlp` downloads it (handling adaptive bitrate and retries), `ffprobe` (ships with `ffmpeg`) returns structured metadata for the Source `media:video` bundle decision, and `ffmpeg` extracts a poster frame when the page didn't declare one. Skill-side wiring for this lands in a future site-copy update.
 
 ---
 
