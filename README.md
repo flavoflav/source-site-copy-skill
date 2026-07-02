@@ -53,7 +53,7 @@ If you're running outside a Nebula-created directory and Step 0 reports a missin
 
 ### Install the underlying CLIs
 
-`agent-browser` is a Node binary; `local-power-tools` is a curated set of CLIs (`ast-grep`, `difft`, `sd`, `comby`, `scc`, `yq`, `shellcheck`, `hyperfine`, `watchexec`, `vips`, `odiff`, `aria2c`, `htmlq`, `exiftool`, `biome`). The repo ships a universal installer that handles all of them:
+`agent-browser` is a Node binary; `local-power-tools` is a curated set of CLIs and libraries (`ast-grep`, `difft`, `sd`, `comby`, `scc`, `yq`, `shellcheck`, `hyperfine`, `watchexec`, `vips`, `odiff`, `aria2c`, `htmlq`, `exiftool`, `biome`, `beautifulsoup4`). The repo ships a universal installer that handles all of them:
 
 ```bash
 ./local-power-tools-install.sh             # install everything that's missing
@@ -85,11 +85,14 @@ The installer auto-detects your platform — macOS (Homebrew), Debian/Ubuntu (ap
 | 15 | htmlq         | htmlq        | —                        | —                      | —                     | `cargo install htmlq`          |
 | 16 | exiftool      | exiftool     | libimage-exiftool-perl   | perl-Image-ExifTool    | perl-image-exiftool   | manual                         |
 | 17 | biome         | biome        | —                        | —                      | —                     | `npm i -g @biomejs/biome`      |
-| 18 | agent-browser | —            | —                        | —                      | —                     | `npm i -g agent-browser` + `agent-browser install` |
+| 18 | bs4 (beautifulsoup4) | —     | python3-bs4              | python3-beautifulsoup4 | python-beautifulsoup4 | `python3 -m pip install --user beautifulsoup4` |
+| 19 | agent-browser | —            | —                        | —                      | —                     | `npm i -g agent-browser` + `agent-browser install` |
 
 A `—` means there's no native package on that platform; the installer uses the fallback in the last column. Run `./local-power-tools-install.sh --list` to see the exact command the installer would run on your machine for each tool.
 
-**`ffmpeg` + `yt-dlp`** are the video pipeline. They don't discover videos themselves — `agent-browser` does that by executing the page's JavaScript and reading the resolved `<video>` `currentSrc` / `<source>` URLs (modern marketing pages render video tags in JS, so static HTML scrapes find nothing). Once `agent-browser` hands over a real video or HLS/DASH manifest URL, `yt-dlp` downloads it (handling adaptive bitrate and retries), `ffprobe` (ships with `ffmpeg`) returns structured metadata for the Source `media:video` bundle decision, and `ffmpeg` extracts a poster frame when the page didn't declare one. Skill-side wiring for this lands in a future site-copy update.
+**`bs4` (beautifulsoup4)** is the one Python library in the set — it has no binary, so the installer detects it by `python3 -c 'import bs4'` instead of `PATH`, and `--only`/`--skip` match it as `bs4`. It complements `htmlq`: `htmlq` for one-line CSS-selector extraction, `bs4` for HTML work that needs real logic (tree traversal, rewriting markup, tolerating malformed HTML).
+
+**`ffmpeg` + `yt-dlp`** are the video pipeline. They don't discover videos themselves — `agent-browser` does that by executing the page's JavaScript and reading the resolved `<video>` `currentSrc` / `<source>` URLs (modern marketing pages render video tags in JS, so static HTML scrapes find nothing). Once `agent-browser` hands over a real video or HLS/DASH manifest URL, `yt-dlp` downloads it (handling adaptive bitrate and retries), `ffprobe` (ships with `ffmpeg`) returns structured metadata for the Source `media:video` bundle decision, and `ffmpeg` extracts a poster frame when the page didn't declare one. This pipeline is wired into the skill's Step 4 ("Videos").
 
 ---
 
@@ -123,13 +126,21 @@ A curated toolbox of fast, structured CLI replacements for common Unix defaults.
 
 | Tool | Used for | Step |
 |------|----------|------|
-| **`vips`** | Image conversion, resizing, format swaps — **especially SVG → PNG/WebP/AVIF** since Source rejects `image/svg+xml` | Step 4 |
-| **`odiff`** | Pixel-level screenshot comparison with measured parity score and diff image output | Step 7 |
-| **`scc`** | Counting components, lines of code, complexity at the end of a run | Step 8 (report) |
-| **`ast-grep`** | Structural code search and refactor when fixing prop-naming or token-consumption issues across many components | Step 5 |
-| **`difft`** (difftastic) | Syntax-aware diffs when reviewing component changes between diff-loop passes | Step 7 |
+| **`htmlq`** | One-line CSS-selector extraction from captured HTML (link lists, quick checks) | Steps 1–2 |
+| **`bs4`** (beautifulsoup4) | Structural decomposition signatures; content-field extraction for content types | Steps 2, 4c |
+| **`aria2c`** | Parallel download of every media asset and content-type hero (never a curl loop) | Steps 4, 4c |
+| **`exiftool`** | Pre-upload validation: real format + dimensions, catches HTML-error-page downloads | Steps 4, 4c |
+| **`vips`** | Image conversion, resizing, format swaps — **especially SVG → PNG** since Source rejects `image/svg+xml`, and webp/avif → jpg for restricted media bundles | Steps 4, 4c |
+| **`yt-dlp`** + **`ffmpeg`**/`ffprobe` | Video download (URL discovered by agent-browser), bundle metadata, poster extraction | Step 4 |
+| **`yq`** | `component.yml` prop ID ↔ title lint check across the component tree | Step 5 |
+| **`ast-grep`** | Structural code search and refactor when fixing prop-naming or token-consumption issues across many components | Steps 5, 7 |
 | **`sd`** | Literal/regex find-and-replace when rewriting image URLs to MID form in page JSON | Step 6 |
-| **`hyperfine`** | Benchmarking the capture step on larger sites | Step 1 |
+| **`odiff`** | Pixel-level screenshot comparison with measured parity score and diff image output — runs **before** any eyeballing, every pass | Step 7 |
+| **`difft`** (difftastic) | Syntax-aware diffs when reviewing component changes between diff-loop passes | Step 7 |
+| **`scc`** | Counting components, lines of code, complexity at the end of a run | Step 8 (report) |
+| **`shellcheck`** | Lint every shell script the skill authors, before first run | all |
+| **`hyperfine`** | Benchmarking the capture step on larger sites *(optional)* | Step 1 |
+| **`watchexec`** | Auto re-run `code:fix` + `canvas validate` during fix passes *(optional)* | Steps 5, 7 |
 
 The Step 7 diff loop in particular benefits from `odiff` — it produces a numeric parity score and a visual diff image, which is much more honest than eyeballing side-by-side screenshots.
 

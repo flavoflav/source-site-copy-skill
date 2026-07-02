@@ -45,6 +45,8 @@ TOOLS=(
   "htmlq       | htmlq           |                          |                          |            | cargo:htmlq"
   "exiftool    | exiftool        | libimage-exiftool-perl   | perl-Image-ExifTool      | perl-image-exiftool | manual:https://exiftool.org/install.html"
   "biome       | biome           |                          |                          |            | npm:@biomejs/biome"
+  # "py:<module>" rows are Python libraries, not binaries — detected by import, installed via pip.
+  "py:bs4      |                 | python3-bs4              | python3-beautifulsoup4   | python-beautifulsoup4 | pip:beautifulsoup4"
 )
 
 AGENT_BROWSER_PKG="agent-browser"   # installed via npm install -g
@@ -151,6 +153,25 @@ in_list() {
   return 1
 }
 
+# "py:<module>" tools are Python libraries with no binary on PATH — probe them
+# by import. Everything else is a normal `command -v` check.
+tool_installed() {
+  case "$1" in
+    py:*) python3 -c "import ${1#py:}" >/dev/null 2>&1 ;;
+    *)    command -v "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
+tool_path() {
+  case "$1" in
+    py:*) python3 -c "import ${1#py:} as m; print(m.__file__)" 2>/dev/null ;;
+    *)    command -v "$1" ;;
+  esac
+}
+
+# name shown to the user and matched by --only/--skip (strips the py: marker)
+display_name() { printf '%s' "${1#py:}"; }
+
 # parse one TOOLS row → sets BIN, BREW, APT, DNF, PACMAN, FALLBACK
 parse_row() {
   local row="$1" IFS='|' parts
@@ -176,6 +197,7 @@ plan_install() {
   case "$FALLBACK" in
     cargo:*)  echo "cargo install --locked ${FALLBACK#cargo:}"; return ;;
     npm:*)    echo "npm install -g ${FALLBACK#npm:}"; return ;;
+    pip:*)    echo "python3 -m pip install --user ${FALLBACK#pip:}"; return ;;
     go:*)     echo "go install ${FALLBACK#go:}@latest"; return ;;
     binary:*) echo "# Download a release binary from: ${FALLBACK#binary:}"; return ;;
     manual:*) echo "# Install manually — see: ${FALLBACK#manual:}"; return ;;
@@ -193,15 +215,15 @@ if [[ $LIST_ONLY -eq 1 ]]; then
   printf '%-12s %-10s %s\n' "----" "------" "---------------"
   for row in "${TOOLS[@]}"; do
     parse_row "$row"
-    if command -v "$BIN" >/dev/null 2>&1; then
+    if tool_installed "$BIN"; then
       status="${c_green}installed${c_reset}"
-      plan="$(command -v "$BIN")"
+      plan="$(tool_path "$BIN")"
     else
       status="${c_yellow}missing${c_reset}"
       plan="$(plan_install)"
       [[ -z "$plan" ]] && plan="${c_red}no install path${c_reset}"
     fi
-    printf '%-12s %b%-10s%b %s\n' "$BIN" "" "$status" "" "$plan"
+    printf '%-12s %b%-10s%b %s\n' "$(display_name "$BIN")" "" "$status" "" "$plan"
   done
   # agent-browser status
   printf '\n%-12s ' "agent-browser"
@@ -240,18 +262,18 @@ PLANNED_CMDS=()
 for row in "${TOOLS[@]}"; do
   parse_row "$row"
 
-  # Filter by --only / --skip
-  if [[ -n "$ONLY_LIST" ]] && ! in_list "$BIN" "$ONLY_LIST"; then continue; fi
-  if [[ -n "$SKIP_LIST" ]] &&   in_list "$BIN" "$SKIP_LIST"; then continue; fi
+  # Filter by --only / --skip (match on the display name, e.g. --only bs4)
+  if [[ -n "$ONLY_LIST" ]] && ! in_list "$(display_name "$BIN")" "$ONLY_LIST"; then continue; fi
+  if [[ -n "$SKIP_LIST" ]] &&   in_list "$(display_name "$BIN")" "$SKIP_LIST"; then continue; fi
 
-  if command -v "$BIN" >/dev/null 2>&1; then
-    ok "$BIN already installed ($(command -v "$BIN"))"
+  if tool_installed "$BIN"; then
+    ok "$(display_name "$BIN") already installed ($(tool_path "$BIN"))"
     continue
   fi
 
   cmd="$(plan_install)"
   if [[ -z "$cmd" ]]; then
-    err "$BIN: no install path for $PM and no fallback configured."
+    err "$(display_name "$BIN"): no install path for $PM and no fallback configured."
     continue
   fi
 
@@ -281,7 +303,7 @@ fi
 
 head "Planned installs (${#PLANNED[@]}):"
 for i in "${!PLANNED[@]}"; do
-  printf '  %-14s %s%s%s\n' "${PLANNED[$i]}" "$c_dim" "${PLANNED_CMDS[$i]}" "$c_reset"
+  printf '  %-14s %s%s%s\n' "$(display_name "${PLANNED[$i]}")" "$c_dim" "${PLANNED_CMDS[$i]}" "$c_reset"
 done
 
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -298,26 +320,27 @@ head "Installing…"
 FAILED=()
 for i in "${!PLANNED[@]}"; do
   bin="${PLANNED[$i]}"
+  disp="$(display_name "$bin")"
   cmd="${PLANNED_CMDS[$i]}"
   say ""
-  say "── $bin ──"
+  say "── $disp ──"
   # Commands starting with '#' are manual-install notes
   if [[ "$cmd" == \#* ]]; then
-    warn "$bin: no automatic install on this platform."
+    warn "$disp: no automatic install on this platform."
     say  "  ${cmd#\# }"
-    FAILED+=("$bin (manual)")
+    FAILED+=("$disp (manual)")
     continue
   fi
   if run "$cmd"; then
-    if command -v "$bin" >/dev/null 2>&1; then
-      ok "$bin installed."
+    if tool_installed "$bin"; then
+      ok "$disp installed."
     else
-      warn "$bin: command not on PATH after install. Check your shell profile."
-      FAILED+=("$bin (PATH)")
+      warn "$disp: command not on PATH after install. Check your shell profile."
+      FAILED+=("$disp (PATH)")
     fi
   else
-    err "$bin: install command failed."
-    FAILED+=("$bin (failed)")
+    err "$disp: install command failed."
+    FAILED+=("$disp (failed)")
   fi
 done
 
