@@ -57,17 +57,25 @@ If a field is missing or has the wrong type, re-call `add_field_to_content_type`
 
 ## Scrape pipeline
 
-A reusable Node + Playwright pattern that scales to dozens of URLs and writes one JSON per scraped post:
+Run this in **two stages**, and keep them separate — it is the difference between content that lands cleanly in structured fields and content that arrives as mangled HTML.
+
+- **Stage 1 — render & dump (browser).** A headless browser is required *only* for what a browser uniquely does: execute the page's JS, trigger lazy-loads, resolve relative URLs to absolute, and read each image's *rendered* `naturalWidth`/`Height`. Its output is not structured fields — it is the resolved article HTML, stamped with those rendered dimensions, written to disk.
+- **Stage 2 — extract (Python + BeautifulSoup).** All field extraction — title, subtitle, hero, body-container detection, body-HTML cleaning, inline images, date, author — happens here, over the saved HTML. `beautifulsoup4` is the sanctioned tool for this (see the `local-power-tools` skill: htmlq for one-line selects, **bs4 when the HTML work needs real logic** — tree traversal, restructuring, tolerating malformed markup). This is exactly that case.
+
+**Why split it.** Doing extraction in `page.evaluate` couples every heuristic to a live network round-trip: to fix one wrong subtitle you re-scrape all N posts, and you can't unit-test DOM code in isolation. With bs4 the extraction runs offline against cached HTML, so you iterate on a selector in seconds, re-run across the whole corpus for free, and diff the JSON output — which is what "accurately move content into content types" actually requires. The browser stage stays tiny and almost never needs to change.
+
+### Stage 1 — render & dump HTML
 
 ```js
-// scripts/scrape-<bundle>.mjs
+// scripts/dump-<bundle>-html.mjs — render each URL, resolve URLs, stamp rendered
+// image dimensions, and write the article HTML. NO field extraction here.
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
-const OUT = 'recon/blog/raw';
+const OUT = 'recon/blog/html';
 mkdirSync(OUT, { recursive: true });
 
-async function scrape(browser, url) {
+async function dump(browser, url) {
   const slug = url.replace(/\/$/, '').split('/').pop();
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 } });
   try {
@@ -82,106 +90,26 @@ async function scrape(browser, url) {
       await page.waitForTimeout(150);
     }
 
-    const data = await page.evaluate(() => {
+    // The browser's only job: resolve URLs to absolute, stamp each <img> with its
+    // rendered naturalWidth/Height (bs4 can't compute these), tag the root with the
+    // source URL, and hand back the article HTML. Field extraction is Stage 2.
+    const html = await page.evaluate(() => {
       const abs = (u) => { try { return new URL(u, location.href).href; } catch { return u; } };
-      const article = document.querySelector('article') || document.querySelector('main') || document.body;
-      const h1 = document.querySelector('h1');
-      const title = h1?.textContent?.trim() || document.title.trim();
-
-      // Subtitle: nearest paragraph after H1 of moderate length.
-      let subtitle = null;
-      if (h1) {
-        let scope = h1.parentElement;
-        for (let i = 0; i < 4 && scope && !subtitle; i++) {
-          for (const el of scope.querySelectorAll('p')) {
-            if (el === h1) continue;
-            const t = el.textContent.trim();
-            if (t.length >= 30 && t.length <= 300 && /[.!?]/.test(t.slice(-3))) {
-              if (el.compareDocumentPosition(h1) & Node.DOCUMENT_POSITION_PRECEDING) {
-                subtitle = t; break;
-              }
-            }
-          }
-          scope = scope.parentElement;
-        }
-      }
-
-      // Hero: first image inside article with naturalWidth >= 600.
-      let hero = null;
-      for (const img of article.querySelectorAll('img')) {
-        const w = img.naturalWidth || parseInt(img.getAttribute('width') || '0', 10);
-        if (w >= 600) { hero = { src: abs(img.currentSrc || img.src), alt: img.alt || '' }; break; }
-      }
-
-      // Body: deepest container holding >= 2 <p> and >= 1 <h2>.
-      let bodyEl = null, bestScore = 0;
-      article.querySelectorAll('div, section, article').forEach((c) => {
-        let p = 0, h2 = 0;
-        for (const ch of c.children) {
-          if (ch.tagName === 'P') p++;
-          if (ch.tagName === 'H2') h2++;
-        }
-        const score = p >= 2 && h2 >= 1 ? p + h2 * 2 : 0;
-        if (score > bestScore) { bestScore = score; bodyEl = c; }
+      document.querySelectorAll('img').forEach((img) => {
+        const src = abs(img.currentSrc || img.src);
+        if (src) img.setAttribute('src', src);
+        img.setAttribute('data-nw', String(img.naturalWidth || 0));
+        img.setAttribute('data-nh', String(img.naturalHeight || 0));
+        img.removeAttribute('srcset');
+        img.removeAttribute('sizes');
       });
-
-      let bodyHtml = '';
-      const inlineImages = [];
-      if (bodyEl) {
-        const clone = bodyEl.cloneNode(true);
-        // Strip noise: forms, CTAs, related, share widgets, author block.
-        clone.querySelectorAll('form, [class*="form" i], [class*="cta" i], [class*="related" i], [class*="share" i], [class*="newsletter" i], [class*="author" i], button').forEach((el) => el.remove());
-        clone.querySelectorAll('img').forEach((img) => {
-          const src = abs(img.currentSrc || img.src);
-          img.removeAttribute('srcset');
-          img.removeAttribute('sizes');
-          img.removeAttribute('loading');
-          if (src) img.setAttribute('src', src);
-          inlineImages.push({ src, alt: img.alt || '' });
-        });
-        // Strip presentation attrs (preserve only structural HTML).
-        clone.querySelectorAll('*').forEach((el) => {
-          for (const a of Array.from(el.attributes)) {
-            if (a.name.startsWith('data-') || a.name === 'class' || a.name === 'style' || a.name === 'id' || a.name.startsWith('aria-')) {
-              el.removeAttribute(a.name);
-            }
-          }
-        });
-        bodyHtml = clone.innerHTML.trim();
-      }
-
-      // Date: <time> element first, fall back to a "Month DD, YYYY" regex on document text.
-      let publishedDate = null;
-      const timeEl = document.querySelector('time');
-      if (timeEl) publishedDate = timeEl.getAttribute('datetime') || timeEl.textContent.trim();
-      if (!publishedDate) {
-        const m = document.body.innerText.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/);
-        if (m) publishedDate = m[0];
-      }
-
-      // Author: look for an "About the author" block.
-      let authorName = null, authorBio = null;
-      const headings = Array.from(article.querySelectorAll('h2, h3, h4'));
-      const authH = headings.find((h) => /about the author|meet the author/i.test(h.textContent || ''));
-      if (authH) {
-        // Walk siblings/ancestors for a name line and a bio paragraph.
-        let scope = authH.parentElement || document.body;
-        for (let i = 0; i < 4 && (!authorName || !authorBio); i++) {
-          if (!scope) break;
-          for (const el of scope.children) {
-            const t = (el.textContent || '').trim();
-            if (!authorName && /^[A-Z][a-z'-]+(\s[A-Z][a-z'-]+){1,3}$/.test(t)) authorName = t;
-            else if (authorName && !authorBio && el.tagName === 'P' && t.length > 30) { authorBio = t; break; }
-          }
-          scope = scope.parentElement;
-        }
-      }
-
-      return { url: location.href, title, subtitle, hero, publishedDate, bodyHtml, inlineImages, author: { name: authorName, bio: authorBio } };
+      document.querySelectorAll('a[href]').forEach((a) => a.setAttribute('href', abs(a.getAttribute('href'))));
+      const scope = document.querySelector('article') || document.querySelector('main') || document.body;
+      scope.setAttribute('data-src-url', location.href);
+      return scope.outerHTML;
     });
 
-    data.slug = slug;
-    writeFileSync(`${OUT}/${slug}.json`, JSON.stringify(data, null, 2));
+    writeFileSync(`${OUT}/${slug}.html`, html);
     return { slug, ok: true };
   } catch (err) {
     return { slug, ok: false, error: err.message };
@@ -200,7 +128,7 @@ await new Promise((resolve) => {
     while (inflight < CONC && cursor < urls.length) {
       const u = urls[cursor++];
       inflight++;
-      scrape(browser, u).then((r) => console.log(r.ok ? 'OK' : 'ERR', r.slug, r.error || '')).finally(() => { inflight--; next(); });
+      dump(browser, u).then((r) => console.log(r.ok ? 'OK' : 'ERR', r.slug, r.error || '')).finally(() => { inflight--; next(); });
     }
   }
   next();
@@ -208,54 +136,156 @@ await new Promise((resolve) => {
 await browser.close();
 ```
 
-Call with the list of URLs as args, or refactor to read from `recon/<bundle>/index.json`.
+Call with the list of URLs as args, or refactor to read from `recon/<bundle>/index.json`. This writes `recon/blog/html/<slug>.html` per post — resolved, dimension-stamped, ready for Stage 2.
 
-**The scrape will miss things.** Subtitle and author detection are heuristic — for ~3 posts out of 17 in our workshop, the subtitle came back null or the author was wrong. That's acceptable for the workshop bar; for production, refine the heuristics with site-specific selectors after inspecting the live HTML for the bundle's actual classes.
+### Stage 2 — extract fields with BeautifulSoup
+
+Parse the dumped HTML into the exact JSON shape the node-import pipeline (below) and the React template consume. Every heuristic lives here, in Python, where it is tolerant of broken markup, testable, and re-runnable offline.
+
+```python
+# scripts/extract_blog.py — Stage 2: dumped HTML -> one structured JSON per post.
+# bs4 owns all extraction: it tolerates the malformed markup real sites emit, runs
+# offline (re-tune a selector without re-scraping), and diffs cleanly between runs.
+import json, re
+from pathlib import Path
+from bs4 import BeautifulSoup
+
+HTML_DIR = Path('recon/blog/html')
+OUT_DIR  = Path('recon/blog/raw'); OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+MONTHS  = 'January|February|March|April|May|June|July|August|September|October|November|December'
+DATE_RE = re.compile(rf'\b(?:{MONTHS})\s+\d{{1,2}},\s+\d{{4}}\b')
+NAME_RE = re.compile(r"^[A-Z][a-z'-]+(?:\s[A-Z][a-z'-]+){1,3}$")
+# Noise to strip from the body — soupsieve supports the case-insensitive `i` flag.
+NOISE   = ('form', '[class*="form" i]', '[class*="cta" i]', '[class*="related" i]',
+           '[class*="share" i]', '[class*="newsletter" i]', '[class*="author" i]', 'button')
+KEEP_ATTRS = {'href', 'src', 'alt', 'colspan', 'rowspan'}  # structural only
+
+def extract(html):
+    soup = BeautifulSoup(html, 'html.parser')   # tolerant; swap to 'lxml' if installed
+    article = soup.find('article') or soup.find('main') or soup
+    root = soup.find(attrs={'data-src-url': True})
+    url = root.get('data-src-url') if root else None
+
+    h1 = article.find('h1')
+    title = h1.get_text(strip=True) if h1 else ''
+
+    # Subtitle: first moderate, sentence-like <p> whose nearest preceding H1 is the title.
+    subtitle = None
+    for p in article.find_all('p'):
+        if h1 is not None and p.find_previous('h1') is h1:
+            t = p.get_text(strip=True)
+            if 30 <= len(t) <= 300 and t[-1:] in '.!?':
+                subtitle = t
+                break
+
+    # Hero: first body image whose Stage-1-stamped naturalWidth (data-nw) >= 600.
+    hero = None
+    for img in article.find_all('img'):
+        w = int(img.get('data-nw') or img.get('width') or 0)
+        if w >= 600:
+            hero = {'src': img.get('src', ''), 'alt': img.get('alt', '')}
+            break
+
+    # Body: the container whose *direct* children hold the most (>=2 <p> and >=1 <h2>).
+    body_el, best = None, 0
+    for c in article.find_all(['div', 'section', 'article']):
+        kids = c.find_all(recursive=False)
+        p  = sum(1 for k in kids if k.name == 'p')
+        h2 = sum(1 for k in kids if k.name == 'h2')
+        score = (p + h2 * 2) if (p >= 2 and h2 >= 1) else 0
+        if score > best:
+            best, body_el = score, c
+
+    body_html, inline_images = '', []
+    if body_el is not None:
+        for junk in body_el.select(', '.join(NOISE)):
+            junk.decompose()
+        for img in body_el.find_all('img'):
+            inline_images.append({'src': img.get('src', ''), 'alt': img.get('alt', '')})
+        for el in body_el.find_all(True):                       # strip presentation attrs
+            el.attrs = {k: v for k, v in el.attrs.items() if k in KEEP_ATTRS}
+        body_html = body_el.decode_contents().strip()
+
+    # Date: <time> first, else a "Month DD, YYYY" match in the article text.
+    published = None
+    time_el = article.find('time')
+    if time_el is not None:
+        published = time_el.get('datetime') or time_el.get_text(strip=True)
+    if not published:
+        m = DATE_RE.search(article.get_text(' ', strip=True))
+        published = m.group(0) if m else None
+
+    # Author: an "About the author" heading, then the next name line + bio paragraph.
+    author = {'name': None, 'bio': None}
+    auth_h = article.find(lambda t: t.name in ('h2', 'h3', 'h4')
+                          and re.search(r'about the author|meet the author', t.get_text(), re.I))
+    if auth_h is not None:
+        for el in auth_h.find_all_next(['p', 'strong', 'span']):
+            t = el.get_text(strip=True)
+            if not author['name'] and NAME_RE.match(t):
+                author['name'] = t
+            elif author['name'] and el.name == 'p' and len(t) > 30:
+                author['bio'] = t
+                break
+
+    return {'url': url, 'title': title, 'subtitle': subtitle, 'hero': hero,
+            'publishedDate': published, 'bodyHtml': body_html,
+            'inlineImages': inline_images, 'author': author}
+
+for path in sorted(HTML_DIR.glob('*.html')):
+    rec = extract(path.read_text(encoding='utf-8'))
+    rec['slug'] = path.stem
+    (OUT_DIR / f'{path.stem}.json').write_text(json.dumps(rec, indent=2))
+    print('OK ' if rec['title'] else 'WARN', path.stem, '' if rec['title'] else '(no title)')
+```
+
+Run: `python3 scripts/extract_blog.py`. Output is one `recon/blog/raw/<slug>.json` per post — identical shape to what the node-import pipeline expects.
+
+**The extraction will still miss things** — subtitle and author detection are heuristic. But because it's bs4 over cached HTML, refining is cheap: open the one `<slug>.html` that came out wrong, adjust the selector, and re-run `extract_blog.py` across the whole corpus in seconds with no re-scrape. For production, add bundle-specific selectors (the site's real classes) at the top of each `extract` step and prefer them, falling back to these generic heuristics. **Spot-check every field of 3–5 posts against the live pages before the node import** — structured content is only as good as this stage.
 
 ---
 
 ## Media upload pipeline
 
-`media:image` accepts only **jpg/png/gif** on most Source installs — convert webp/avif at download time. For Contentful CDNs, append `?fm=jpg&w=1600&q=85`. For other CDNs, request `Accept: image/jpeg` or convert locally with sharp/ffmpeg.
+`media:image` accepts only **jpg/png/gif** on most Source installs — convert webp/avif at download time. For Contentful CDNs, append `?fm=jpg&w=1600&q=85` so the CDN converts for you. For other CDNs, request `Accept: image/jpeg` or convert locally with `vips` (per `local-power-tools` — not sharp/ffmpeg).
 
-```js
-// scripts/download-and-upload.mjs (skeleton)
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
-import { mkdirSync } from 'node:fs';
+Download all heroes in one parallel `aria2c` run — never a serial fetch/curl loop. Build the input file from the extracted JSON, fetch, then validate the whole directory with one `exiftool` batch:
 
-const RAW = 'recon/blog/raw';
-const HERO_DIR = 'public/media/blog/hero';
-mkdirSync(HERO_DIR, { recursive: true });
+```bash
+# Input file: URL line + out= line per hero (Contentful gets the ?fm=jpg transform).
+python3 - <<'PY' > /tmp/hero-urls.txt
+import json, pathlib
+from urllib.parse import urlsplit, urlencode, parse_qsl, urlunsplit
+for f in sorted(pathlib.Path('recon/blog/raw').glob('*.json')):
+    d = json.loads(f.read_text())
+    src = (d.get('hero') or {}).get('src')
+    if not src: continue
+    u = urlsplit(src)
+    if 'ctfassets.net' in u.netloc:
+        q = dict(parse_qsl(u.query)); q.update(fm='jpg', w='1600', q='85')
+        src = urlunsplit(u._replace(query=urlencode(q)))
+    print(src); print(f"  out={d['slug']}.jpg")
+PY
+aria2c -j 12 -d public/media/blog/hero -i /tmp/hero-urls.txt --max-tries=3 --retry-wait=2 \
+  --user-agent='Mozilla/5.0'
 
-// Pass 1: download all heroes as jpg.
-for (const f of readdirSync(RAW).filter((f) => f.endsWith('.json'))) {
-  const data = JSON.parse(readFileSync(`${RAW}/${f}`));
-  if (!data.hero?.src) continue;
-  let src = data.hero.src;
-  try {
-    const u = new URL(src);
-    if (u.hostname.includes('ctfassets.net')) {
-      u.searchParams.set('fm', 'jpg');
-      u.searchParams.set('w', '1600');
-      u.searchParams.set('q', '85');
-      src = u.toString();
-    }
-  } catch {}
-  const res = await fetch(src, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!res.ok) { console.warn(`skip ${data.slug}: ${res.status}`); continue; }
-  const buf = Buffer.from(await res.arrayBuffer());
-  writeFileSync(`${HERO_DIR}/${data.slug}.jpg`, buf);
-}
+# Validate the real format before upload; convert anything that isn't actually jpg.
+exiftool -FileType -ImageWidth -ImageHeight -T public/media/blog/hero/*.jpg
+for f in public/media/blog/hero/*.jpg; do
+  [ "$(exiftool -s3 -FileType "$f")" = "JPEG" ] || vips copy "$f" "${f%.jpg}-conv.jpg[Q=85]"
+done
 ```
 
-Then in your conversation, batch the `create_media` MCP calls (10–15 in parallel), capture each returned `{mid, upload_url}`, and PUT the bytes in parallel:
+A `FileType` of `HTML`/`TXT` is a failed download hiding behind a `.jpg` extension — re-fetch or log it; never upload it.
+
+Then in your conversation, batch the `create_media` MCP calls (10–15 in parallel), capture each returned `{mid, upload_url}`, and PUT the bytes 10-way parallel (uploads are PUTs, so this stays `curl` — `aria2c` is download-only):
 
 ```bash
 # /tmp/blog-uploads.tsv: mid<TAB>slug<TAB>upload_url per line
-while IFS=$'\t' read mid slug url; do
-  curl -sS -X PUT "$url" -H "Content-Type: application/octet-stream" --data-binary "@public/media/blog/hero/${slug}.jpg" \
-    -o /tmp/up-${mid}.json -w "%{http_code}\n"
-done < /tmp/blog-uploads.tsv
+xargs -P 10 -n 3 sh -c 'curl -sS -X PUT "$2" -H "Content-Type: application/octet-stream" \
+  --data-binary "@public/media/blog/hero/$1.jpg" -o /tmp/up-$0.json -w "%{http_code} $1\n"' \
+  < /tmp/blog-uploads.tsv
 ```
 
 Save the slug→MID map to `recon/<bundle>/media-target-ids.json` **after every batch** — MCP tokens expire after ~15 min and you must be able to resume without replaying uploads.
@@ -471,6 +501,10 @@ const BlogPost = ({
   // FormattedText would wrap inline <img> tags in Canvas's responsive-image
   // processor, which fails on plain CDN/file URLs ("Responsive image generation
   // failed"). dangerouslySetInnerHTML bypasses the wrapper.
+  // Typography for this body is handled by @tailwindcss/typography (`prose`),
+  // which is mandatory on all projects (see SKILL.md Step 3) — not hand-rolled
+  // heading/paragraph utilities. The `prose` wrapper is applied where bodyHtml
+  // renders, below.
   const bodyHtml = post?.body?.processed || post?.body?.value || '';
 
   if (!trimmedSlug) return <section className="px-6 py-16 text-center text-ink-subtle">Pass a <code>slug</code> prop.</section>;
@@ -618,7 +652,7 @@ A field log of every bug from this session, with the exact symptom and the fix. 
 
 ### Media upload
 
-- **`File extension "webp" is not allowed for media type "image"`**: the schema's `supported types` list is install-aspirational; the media:image bundle is often restricted to jpg/png/gif. Convert to jpg before upload (Contentful: `?fm=jpg`; otherwise sharp/ffmpeg).
+- **`File extension "webp" is not allowed for media type "image"`**: the schema's `supported types` list is install-aspirational; the media:image bundle is often restricted to jpg/png/gif. Convert to jpg before upload (Contentful: `?fm=jpg`; otherwise `vips copy in.webp out.jpg[Q=85]`).
 - **`Unsupported image type "image/svg+xml"`**: SVG isn't supported on media:image. Convert to PNG.
 - **MCP token expired mid-upload**: tokens expire after ~15 min. Save the slug→MID map after every batch so you can resume. Re-auth and continue from the last saved slug.
 

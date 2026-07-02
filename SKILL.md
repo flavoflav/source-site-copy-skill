@@ -35,7 +35,20 @@ Read the `SKILL.md` of each listed skill in full before Step 1. If any are missi
 These two skills are **load-bearing infrastructure** for every site-copy run. Do not advance past Step 0 if either is missing.
 
 1. **`agent-browser`** — the only sanctioned way to drive Chrome/Safari for live-site capture, screenshotting, visual diffing, and DOM extraction (Steps 1, 1a, 1b, 7). Site-copy depends on its `--session`, `screenshot --full`, `eval --stdin`, and DOM-walk capabilities. Do **not** substitute generic browser tools, raw Playwright, or Claude-in-Chrome — agent-browser already encodes the capture patterns site-copy expects (combined `eval` per page, parallel `--session` browsers, the Workbench iframe screenshot trick).
-2. **`local-power-tools`** — the project's local utility toolbox (file operations, parallel batch helpers, repo-aware scripts). Required for the per-batch git commits in Step 0.5, the media download/validate pipeline in Step 4, the page generator in Step 6, and the content-type import scripts in Step 4c. Site-copy authors scripts that lean on local-power-tools conventions; running without it produces ad-hoc scripts that don't compose with the rest of the workflow.
+2. **`local-power-tools`** — the local utility toolbox. Its mapping table is a **hard rule** during site-copy: when a step below names a tool, use that tool, not the Unix default. The load-bearing assignments:
+   - **`htmlq`** (one-line CSS-selector extraction) + **`beautifulsoup4`** (HTML analysis needing logic) — Steps 1–2 recon and the Step 4c content scrape.
+   - **`aria2c`** — every multi-URL download (Step 4 media, Step 4c heroes). Never a `curl`/`wget` loop.
+   - **`exiftool`** — validate every image **before** upload (real format, dimensions, catches HTML error pages). Never bare `file`.
+   - **`vips`** — all image conversion/resizing (SVG→PNG, webp/avif→jpg). Never ImageMagick/sharp/ffmpeg-for-stills.
+   - **`yt-dlp` + `ffmpeg`/`ffprobe`** — the Step 4 video pipeline (agent-browser discovers the URL first; yt-dlp can't find videos on JS-rendered marketing pages).
+   - **`sd`** — literal/regex rewrites across `pages/*.json` and recon files (Step 6/8 fixups). Never `sed`.
+   - **`ast-grep`** (or `comby` where it lacks a parser) — structural find/replace across components (Step 5/7 refactors). Never regex-grep for code.
+   - **`yq`** — querying/checking `component.yml` files (Step 5 prop lint). Never grep/sed on YAML.
+   - **`odiff`** — measured screenshot parity in the Step 7 diff loop. Never eyeball-only scoring.
+   - **`difft`** — reviewing component diffs between Step 7 passes.
+   - **`scc`** — the Step 8 report's component/LOC counts.
+   - **`shellcheck`** — run on every shell script this skill authors, before first execution.
+   - **`hyperfine`** (benchmarking capture variants, Step 1c) and **`watchexec`** (auto-revalidate loops, Step 5) — optional accelerators.
 
 **Verification before any other work:** state to the user, in the first turn after the skill triggers:
 
@@ -133,6 +146,14 @@ agent-browser --session sitecopy screenshot ./recon/screens/desktop/<slug>.png -
 
 Write the JSON output to `./recon/raw/<slug>.json`. The screenshot is captured in the same session without reloading the page.
 
+**Also persist the rendered HTML** for offline structural analysis in Step 2 (and, for dynamic bundles, the content scrape in Step 4c). In the same session, dump the main content subtree — after JS has run and lazy content is in the DOM — to `./recon/html/<slug>.html`:
+
+```bash
+agent-browser --session sitecopy eval 'document.querySelector("main")?.outerHTML || document.body.outerHTML' > ./recon/html/<slug>.html
+```
+
+This is the input BeautifulSoup parses — never re-fetch the page with a raw HTTP GET for analysis, since that returns the pre-hydration shell and misses everything rendered by JS.
+
 ### Nebula branch
 
 Use `nebula-scrape-url` for the scrape — it handles DOM, assets, and computed styles in one pass. Fall back to `agent-browser` for anything `nebula-scrape-url` misses (notably nav interaction states — see Step 1a).
@@ -224,11 +245,15 @@ These two files (`nav.json`, `footer-nav.json`) become the specs for the `naviga
 
 For larger sites, spawn multiple agent-browser sessions in parallel: `agent-browser --session p1 …`, `agent-browser --session p2 …`. Three sessions cuts capture time by ~60% on 10-page sites. Don't reuse a single session sequentially when you could parallelize.
 
+If you're tuning capture strategy on a big site (2 vs 3 sessions, networkidle vs load), measure with `hyperfine --warmup 1 'capture-variant-a' 'capture-variant-b'` — never compare by eyeballing `time` output.
+
 Do not analyze yet. Capture only.
 
 ---
 
 ## Step 2 — Decompose into a component catalog
+
+Decomposition is **visual-first** (screenshots) but **structure-corroborated** (HTML). The screenshots tell you what a human sees; the DOM tells you what actually repeats. Use both — screenshots alone over-split (two renders of one component look different) and under-catch (a repeated block scrolled off the fold gets missed).
 
 Follow `canvas-design-decomposition` to walk the screenshots and identify components. Classify each:
 
@@ -254,11 +279,46 @@ Write `./recon/components.md`, one entry per component, this exact shape:
 - **Notes:** sticky on scroll = no; image is decorative when alignment=centered
 ```
 
+### Corroborate boundaries with a BeautifulSoup structural pass
+
+Before finalizing the catalog, parse the captured HTML (`./recon/html/*.html`) with `beautifulsoup4` to turn the "is this one component or two?" question into evidence instead of a guess. bs4 is the sanctioned tool here (per `local-power-tools`: htmlq for one-line selects, **bs4 for HTML analysis that needs logic** — and computing repeat structure across a whole page tree is logic). Two signals do most of the work:
+
+1. **Repeated structure = one component with variants.** Give each element a shallow *structural signature* — tag name + sorted class tokens (optionally + child-tag sequence) — and count how often each signature recurs across and within pages. Blocks that share a signature are the *same* component even when their copy, image, or alignment differs; that is exactly the "one component, many variants" call the rule above demands, made objectively.
+2. **Repeats you didn't see = missed components.** A signature that recurs many times but maps to only one screenshot region usually means a card/list/logo-wall that was below the fold or in an un-captured state. Add it to the catalog.
+
+```python
+# scripts/decompose_signatures.py — rank recurring block structures across pages.
+from pathlib import Path
+from collections import Counter
+from bs4 import BeautifulSoup
+
+sig_pages = {}   # signature -> set of page slugs
+sig_count = Counter()
+for path in sorted(Path('recon/html').glob('*.html')):
+    soup = BeautifulSoup(path.read_text(encoding='utf-8'), 'html.parser')
+    main = soup.find('main') or soup.body or soup
+    for el in main.find_all(['section', 'div', 'article', 'li'], recursive=True):
+        classes = ' '.join(sorted(el.get('class', [])))
+        if not classes:                      # unclassed wrappers carry no signal
+            continue
+        kids = '>'.join(c.name for c in el.find_all(recursive=False) if c.name)
+        sig = f'{el.name}.{classes} [{kids}]'
+        sig_count[sig] += 1
+        sig_pages.setdefault(sig, set()).add(path.stem)
+
+for sig, n in sig_count.most_common(40):
+    pages = sig_pages[sig]
+    print(f'{n:3d}×  on {len(pages):2d} page(s)  {sig[:110]}')
+```
+
+Read the ranking as: **high count + many pages → common/shared component**; **high count + one page → a repeater (grid/list) on that page**; **count 1 → genuinely unique**. Reconcile any mismatch between this and your screenshot-derived catalog before moving on — the DOM is the tie-breaker.
+
 Sanity-check the catalog:
 
 - >15 components for a normal marketing site = over-split. Merge.
 - A "unique" that's actually a variant of a "shared" = merge.
 - Two names that could describe the same thing = merge.
+- A signature that recurs in `decompose_signatures.py` but appears as two catalog entries = merge.
 
 ---
 
@@ -279,11 +339,28 @@ Pull computed styles from the live site (the per-page eval in Step 1 already col
 
 Translate into the Workbench's token files per `canvas-styling-conventions`. Every component must consume tokens. **No hardcoded hex, px, or rem values in any component.** If you reach for a raw value, add a token first.
 
+### Typography: `@tailwindcss/typography` is mandatory (all projects)
+
+**Requirement, non-negotiable on every site-copy run:** all font and text-display handling for flowing/rich text goes through the [`@tailwindcss/typography`](https://github.com/tailwindlabs/tailwindcss-typography) plugin (`prose` classes). This is a standing rule for **all** projects, both Canvas and Nebula branches — never hand-roll paragraph/heading/list/link spacing and sizing with ad-hoc utilities for body copy.
+
+1. **Install** the plugin if it isn't already present: `npm install -D @tailwindcss/typography`.
+2. **Register it in `global.css`** (Tailwind CSS 4 registers plugins in CSS, not a JS config). Add alongside the `@import "tailwindcss";` line:
+
+   ```css
+   @import "tailwindcss";
+   @plugin "@tailwindcss/typography";
+   ```
+
+3. **Tune `prose` to the live site's tokens, don't override it inline.** Map the fonts, sizes, colors, and spacing you extracted above onto the typography theme so `prose` renders in the site's voice. In Tailwind 4 this is done with the `--prose-*` / typography theme keys in `@theme` (font family, body/heading color via your `--color-ink*` tokens, link color via `--color-primary`, measure, etc.). The goal: a bare `prose` block already matches the live site before any per-component tweak.
+4. **Apply `prose` to every block of flowing rich text** — blog/article/case-study bodies, long-form marketing copy, any HTML rendered via `dangerouslySetInnerHTML` (see Step 4c and `references/content-type-migration.md`). Use `prose max-w-none` when the container already constrains width, add a size modifier (`prose-lg`) to match the live measure, and reserve `[&_...]` arbitrary variants for genuine one-off deltas the theme can't express — not as a replacement for tuning the theme.
+
+Short UI strings (button labels, nav items, badges, single-line headings inside chrome) are **not** prose — style those with normal token-driven utilities. `prose` is for multi-element, author-written text flows.
+
 ---
 
 ## Step 4 — Images: scan, download, upload via Source MCP
 
-**Three steps. No CLI media commands. No remote URLs in page JSON.**
+**Scan → download → validate → convert → upload. No CLI media commands. No remote URLs in page JSON.**
 
 This is the workflow that actually works on Acquia Source. The Canvas CLI's media upload endpoint (`/canvas/api/v0/media/image/upload`) 503s under load regardless of source format — remote CDN URLs, `placehold.co`, even inline `data:` URLs. Stop trying to push images that way. Use Source MCP `create_media` and reference media by `target_id`.
 
@@ -295,9 +372,36 @@ Confirm Source MCP is connected (Step 0.5 check 4). If `mcp__source-mcp__create_
 
 1. **Scan.** Use the per-page image inventory already collected in Step 1 (`./recon/raw/<slug>.json`). Consolidate into `./recon/media.json` as `[{"src", "alt", "w", "h", "pages": [...], "role": "hero|content|icon|logo|bg|misc"}]`. Include `<video>` posters as hero entries. Dedupe by basename.
 
-2. **Download.** Pull every asset to `./public/media/<role>/<safe-filename>` in parallel (Python `concurrent.futures` or shell `xargs -P 8`). Preserve original dimensions. Validate each file: size > 0, image magic bytes present, not an HTML error page. Mark each `recon/media.json` entry with `validated: true | false`. Drop validated:false files from the upload set and record them in `./recon/missing-images.md` so the user knows what's missing.
+2. **Download with `aria2c`** — never a `curl`/`wget` loop. Generate an input file from `recon/media.json` (URL line + indented `out=` line per asset), then fetch everything in one parallel run:
 
-3. **Upload via Source MCP.** For every validated local file:
+   ```bash
+   python3 -c "
+   import json
+   for m in json.load(open('recon/media.json')):
+       if m['src'].startswith('http'):
+           print(m['src']); print(f\"  out={m['role']}/{m['src'].rstrip('/').split('/')[-1].split('?')[0]}\")
+   " > recon/media-urls.txt
+   aria2c -j 16 -d public/media -i recon/media-urls.txt --max-tries=3 --retry-wait=2
+   ```
+
+3. **Validate with `exiftool`** — one batch call, not per-file `file` checks. It reports the *real* format and dimensions, which catches the two failure modes that matter: HTML error pages saved with an image extension, and extension/format mismatches that would fail on Source:
+
+   ```bash
+   exiftool -FileType -ImageWidth -ImageHeight -T -r public/media/ > recon/media-validation.tsv
+   ```
+
+   A row whose `FileType` is `HTML`/`TXT`/`-` is a failed download — mark `validated: false`. A `FileType` that doesn't match the extension must be converted (next step) before upload. Mark everything else `validated: true` in `recon/media.json`. Drop validated:false files from the upload set and record them in `./recon/missing-images.md` so the user knows what's missing.
+
+4. **Convert with `vips`** — never ImageMagick/sharp. Two mandatory conversions before upload: **SVG → PNG** (Source rejects `image/svg+xml`) and **webp/avif → jpg** where the install's media:image bundle only accepts jpg/png/gif (common — see `references/content-type-migration.md`):
+
+   ```bash
+   vips copy logo.svg logo.png
+   vips copy hero.webp hero.jpg[Q=85]
+   ```
+
+   Re-run the exiftool batch after converting; upload sets reference the converted files.
+
+5. **Upload via Source MCP.** For every validated (and converted) local file:
    - Call `mcp__source-mcp__create_media` with `bundle: "image"`, descriptive `name`, `filename` (basename), and `metadata: {alt: "..."}`. It returns `target_id` (the MID — a small integer) AND a signed `upload_url`.
    - Upload bytes: `curl -X PUT "<upload_url>" -H "Content-Type: application/octet-stream" --data-binary @<localpath>`. Expect 2xx.
    - Save the mapping to `./recon/media-target-ids.json` keyed by both the original CDN URL and the local file path:
@@ -309,6 +413,15 @@ Confirm Source MCP is connected (Step 0.5 check 4). If `mcp__source-mcp__create_
      ```
    - Parallelize: collect 15–20 `create_media` results, then fire 10-way parallel `curl` PUTs.
    - **Save `recon/media-target-ids.json` after every batch** — Source MCP tokens expire after ~15 min and you must be able to resume without replaying uploads.
+
+### Videos (when the capture found `<video>` elements)
+
+Division of labor is fixed — each tool does the one thing only it can do:
+
+1. **agent-browser discovers the URL.** Modern marketing pages render `<video>` tags in JS; static scrapes and yt-dlp's own discovery find nothing. The Step 1 eval already reads the resolved `currentSrc` / `<source src>` / HLS-DASH manifest URL from the live DOM — that URL is the input to everything below. Never point yt-dlp at the page URL.
+2. **`yt-dlp` downloads it**: `yt-dlp -o 'public/media/video/%(title)s.%(ext)s' '<resolved-url>'` — it handles adaptive-bitrate manifests and retries that `curl` can't.
+3. **`ffprobe` decides the bundle**: `ffprobe -v quiet -print_json -show_format -show_streams <file>` → duration/codec/dimensions for the Source `media:video` bundle decision. Record per video in `recon/media.json`.
+4. **`ffmpeg` extracts the poster** only when the page didn't declare one: `ffmpeg -ss 1 -i <file> -frames:v 1 public/media/hero/<name>-poster.jpg`. Posters go through the same exiftool-validate → upload path as any other image.
 
 ### Verification (mandatory)
 
@@ -454,7 +567,7 @@ For each bundle the user opts in, the workflow is:
 
 1. Analyze the page structure → derive a field list (title, deck, hero, body, author, date, category, …)
 2. `create_content_type` + `batch_add_fields_to_content_type` via Source MCP (workflow ID is install-specific — read it from `/admin/config/workflow/workflows`, not hardcoded `editorial`/`default`)
-3. Scrape every URL for `{title, subtitle, hero, author, publishedDate, bodyHtml, inlineImages}`
+3. Capture every URL to structured fields `{title, subtitle, hero, author, publishedDate, bodyHtml, inlineImages}` via the **two-stage scrape**: a browser dumps resolved HTML, then a **BeautifulSoup** pass extracts the fields (accurate, offline-rerunnable, testable — see the reference)
 4. Convert hero/author images to **jpg** (media:image bundles often reject webp), then `create_media` → `curl PUT` per image — save the slug→MID map after every batch
 5. `batch_create_nodes` per bundle, in chunks of ~8, with `path: { alias: '/<bundle>/<slug>' }`
 6. Build **one** React component per bundle: prop `slug` → SWR fetch the matching node + a second fetch per media UUID → render
@@ -474,6 +587,7 @@ Every component must:
 
 - Take **all content via props** — title, body, image, items[], cta, menu structure. No hardcoded copy.
 - Take **all design via tokens** from Step 3.
+- Render **flowing/rich text through `@tailwindcss/typography` (`prose`)**, per the mandatory rule in Step 3 — never hand-tuned spacing/size utilities for body copy.
 - Cover the variants listed in the catalog using prop-driven variants, not new components.
 - Follow the prop discipline below.
 
@@ -485,7 +599,20 @@ Canvas's lint rule requires every prop ID to be the exact camelCase of its `titl
 - Prop ID `items` ↔ title `Items (HTML)` ✗ (lint expects `itemsHtml`)
 - Prop ID `text` ↔ title `Sub Text` ✗ (lint expects `subText`)
 - Never put parentheticals, units, or descriptors in titles. Use a separate Markdown comment for clarification if needed.
-- Run `npm run code:fix` (which runs prettier + eslint) **before** `npx canvas validate`. The validate step assumes lint-clean.
+- **Check the whole tree with `yq` before validating** — it reads the YAML properly (never grep/sed on `component.yml`) and catches every ID↔title mismatch in one pass:
+
+  ```bash
+  for f in src/components/*/component.yml; do
+    yq -r '.props | to_entries[] | "\(.key) \(.value.title)"' "$f" 2>/dev/null | while read -r id title; do
+      expected=$(echo "$title" | awk '{gsub(/[^a-zA-Z0-9 ]/,""); for(i=1;i<=NF;i++) printf (i==1?tolower(substr($i,1,1)):toupper(substr($i,1,1))) substr($i,2)}')
+      [ "$id" = "$expected" ] || echo "MISMATCH $f: id=$id title=\"$title\" (expected $expected)"
+    done
+  done
+  ```
+
+- When a prop rename does leak into many components, fix it **structurally with `ast-grep`** (`ast-grep --pattern '$P.items' --rewrite '$P.itemsHtml' --lang tsx --update-all` and the matching `yq -i` edit per `component.yml`) — not with regex-grep + sed across the tree.
+- Run `npm run code:fix` (which runs prettier + eslint) **before** `npx canvas validate`. The validate step assumes lint-clean. **Keep the project's `code:fix` authoritative** — Canvas ships a committed ESLint config that `canvas validate` assumes, which is exactly the case where `local-power-tools` says biome must yield to the project's ESLint. Don't swap in `biome` here.
+- During long fix passes, keep validation running automatically instead of re-invoking by hand: `watchexec -e tsx,yml -- sh -c 'npm run code:fix && npx canvas validate'` (optional — skip if watchexec isn't installed).
 
 ### Navigation component (required)
 
@@ -669,6 +796,8 @@ For each page in `./recon/pages.json`:
 
 Generate pages via a small Python templater (`scripts/build-pages.py` in the project) so the shared header/footer/contact blocks are defined once. The templater reads `recon/media-target-ids.json` and rewrites every image source into `{"target_id": <id>}` form in a single pass. Hand-writing 10 page JSONs by hand is slow and error-prone.
 
+For after-the-fact corrections across already-generated pages — a stray CDN URL the Step 4 sanity grep catches, a prop renamed after assembly, a `/media/<mid>` rewrite inside `itemsJson` strings — use **`sd`** across `pages/*.json` (`sd '"src": "https://cdn.example.com/hero.jpg"' '"target_id": 371' pages/*.json`), not `sed`. If the fix is structural rather than literal, regenerate via the templater instead of patching.
+
 ### Nebula branch
 
 1. Scaffold pages per `nebula-node-page-scaffold` or `nebula-workbench-pages`.
@@ -711,17 +840,24 @@ Then `agent-browser screenshot --full` captures the whole page cleanly.
 
 1. Take a Workbench screenshot at **1440px desktop**. For the homepage and 2 reps, also **375px mobile**.
 2. Take screenshots of every navigation interaction state: default, each dropdown open, mega menu open, mobile drawer open, scrolled (sticky transition).
-3. Place each Workbench screenshot side-by-side with the matching `./recon/screens/desktop/<slug>.png` (and `_nav-<state>.png` for nav states).
-4. Walk top to bottom. Write **every** delta into `./recon/diffs/<slug>.md`. For nav: `./recon/diffs/_nav.md`.
+3. **Run `odiff` first** — the measured diff, before any eyeballing:
+
+   ```bash
+   odiff --output-format=json --threshold=0.05 recon/screens/desktop/<slug>.png recon/wb/<slug>.png recon/diffs/<slug>-diff.png
+   ```
+
+   Record the reported match percentage at the top of `./recon/diffs/<slug>.md` (`odiff: 97.4% — pass 2`). The diff image highlights every mismatching region — it's the map for the walk in the next step, and it catches sub-pixel drift (spacing, weight, color) that side-by-side eyeballing misses.
+4. Place each Workbench screenshot side-by-side with the matching `./recon/screens/desktop/<slug>.png` (and `_nav-<state>.png` for nav states). Walk top to bottom **with the odiff image open**, and write **every** delta into `./recon/diffs/<slug>.md`. For nav: `./recon/diffs/_nav.md`. Every highlighted region in the diff image must map to either a written delta or a known acceptable difference (e.g. font anti-aliasing) noted in the file.
 5. For each delta, decide: **component bug** (fixes every page) or **page bug** (this page only).
-6. Apply every fix from the diff. No "skip the small ones".
-7. Re-screenshot. Re-score. Be honest.
+6. Apply every fix from the diff. No "skip the small ones". Before re-screenshotting, review what you actually changed with `difft` (`GIT_EXTERNAL_DIFF=difft git diff`) — syntax-aware diffs surface accidental prop or token changes that plain `git diff` buries in reformatting noise.
+7. Re-screenshot. Re-run `odiff`. Re-score. Be honest — the odiff percentage must move in the right direction; if it dropped, your fix regressed something elsewhere on the page.
 8. If <99, repeat from step 1.
 
 ### Diff file format (unchanged)
 
 ```markdown
 # home — pass 2
+odiff: 97.4% (diff image: ./recon/diffs/home-diff.png)
 
 ## Header / Navigation
 - [ ] Logo too small (live ~32px height, ours ~24px). Component bug: navigation.logoSize prop missing.
@@ -756,7 +892,7 @@ Score each page out of 100. Award points only if the criterion is fully met. The
 | Footer matches | 4 |
 | Validation/lint clean for the page and the components it uses | 3 |
 
-**Honesty check:** if the diff file has any unchecked box in a criterion, you get **zero** points in that row. "Visually indistinguishable in the side-by-side" is the only thing that counts as a match. A page is done when it scores **≥99** and every box in its diff file is checked.
+**Honesty check:** if the diff file has any unchecked box in a criterion, you get **zero** points in that row. "Visually indistinguishable in the side-by-side" is the only thing that counts as a match. A page is done when it scores **≥99**, every box in its diff file is checked, **and** the odiff percentage supports the claim — a self-graded 99 sitting next to an odiff of 94% is a lie unless every remaining highlighted region is explicitly noted as an acceptable rendering difference (anti-aliasing, cursor, timestamps).
 
 ### When stuck (parity plateaus across 2 passes)
 
@@ -772,6 +908,7 @@ Plateaus mean you're patching symptoms instead of structure. Always fix structur
 ### Anti-patterns that drop you below 99
 
 - Eyeballing parity without writing the diff file.
+- Scoring a pass without running `odiff` — a vibes-based percentage is not a measurement.
 - Marking deltas as "minor" or "polish" to skip them.
 - Building a new component to fix a delta when an existing component just needs a new variant.
 - Fixing the homepage only and assuming other pages inherit the fixes.
@@ -846,16 +983,17 @@ Write `./SITE_COPY_REPORT.md`:
 Canvas | Nebula  /  Acquia Source | local-only
 
 ## Pages
-| Page | Parity | Passes |
-|------|--------|--------|
-| home | 100 | 3 |
-| about | 99 | 4 |
+| Page | Parity (rubric) | odiff | Passes |
+|------|-----------------|-------|--------|
+| home | 100 | 99.2% | 3 |
+| about | 99 | 99.0% | 4 |
 | ...
 
 ## Components
 - Common: navigation, footer (+ breadcrumb if present)
 - Shared: <count and names>
 - Unique: <count and names>
+- Code stats (from `scc --by-file src/components/`): N files, N lines, complexity N
 
 ## Tokens extracted
 - Colors: N, Fonts: N, Sizes: N, Spacing: N, Radii: N

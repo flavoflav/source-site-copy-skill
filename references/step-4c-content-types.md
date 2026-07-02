@@ -104,7 +104,7 @@ Verify by reading the schema back: `ReadMcpResourceTool(server="source-mcp", uri
 
 ### 3. Scrape content + images for every URL
 
-For each `exampleUrls` and the rest of the bundle's URLs, run a Playwright scrape that extracts:
+Do this in **two stages** (full scripts in [content-type-migration.md](content-type-migration.md#scrape-pipeline)): a browser stage that renders each URL and dumps the resolved HTML to `./recon/<bundle>/html/<slug>.html`, then a **BeautifulSoup extraction stage** (`scripts/extract_<bundle>.py`) that parses that HTML into the structured fields below. Keep extraction in bs4, not in the browser — it tolerates malformed markup, and you can re-tune a selector and re-run across the whole corpus offline without re-scraping. The fields to extract:
 - `title` (H1)
 - `subtitle` (the deck — usually a P sibling of H1)
 - `hero` (first significant img inside `article` or `main` with naturalWidth ≥ 600)
@@ -114,13 +114,13 @@ For each `exampleUrls` and the rest of the bundle's URLs, run a Playwright scrap
 - `inlineImages` (all `<img>` inside the body for follow-up upload if you want them on Source too)
 - `category` (breadcrumb or section label from the index page)
 
-Write each post to `./recon/<bundle>/raw/<slug>.json`. Run concurrent across multiple Playwright sessions — the index alone has all the URLs to walk.
+The bs4 stage writes each post to `./recon/<bundle>/raw/<slug>.json`. Run the browser dump concurrently across multiple sessions — the index alone has all the URLs to walk — then run the single bs4 pass over the dumped HTML.
 
-The full Playwright scrape script (with subtitle/hero/body/author heuristics) is in [content-type-migration.md](content-type-migration.md#scrape-pipeline).
+The full two-stage pipeline (browser dump + the BeautifulSoup extractor with the subtitle/hero/body/author heuristics) is in [content-type-migration.md](content-type-migration.md#scrape-pipeline).
 
 ### 4. Upload hero + author photos via Source MCP
 
-The bundle's allowed extensions vary by install. Many Source Drupal sites restrict media:image to **jpg/png/gif only** — **webp is rejected on push** despite the schema implying it's accepted. Download images as jpg (Contentful supports `?fm=jpg`; other CDNs respond to `Accept: image/jpeg`). Validate magic bytes after download.
+The bundle's allowed extensions vary by install. Many Source Drupal sites restrict media:image to **jpg/png/gif only** — **webp is rejected on push** despite the schema implying it's accepted. Download images as jpg (Contentful supports `?fm=jpg`; other CDNs respond to `Accept: image/jpeg`). After download, validate the real format with `exiftool -FileType -T <dir>/*` — an `HTML`/`TXT` FileType is an error page, and a non-JPEG FileType behind a `.jpg` extension gets converted with `vips copy in out.jpg[Q=85]` before upload.
 
 For each validated file:
 
@@ -181,7 +181,7 @@ The full annotated React component is in [content-type-migration.md](content-typ
 - **No JSON:API include**. Includes 400 on most Source Canvas installs (filtering on relationships is brittle). Fetch the bare collection (`/api/node/<bundle>`) and resolve hero/author media in a **second fetch per displayed node** (`/api/media/image/<uuid>`). SWR dedupes both, so total network is one bundle call + one fetch per visible hero.
 - **Absolute URLs only**. The Workbench preview iframe is a `srcdoc` document with no usable origin. Read the Source URL from `window.drupalSettings.canvasData.v0.baseUrl` and prefix it to every API call and image URL. Relative URLs route through Canvas's `/canvas/template/.../component/null/...` rewriter, which 303s to nowhere.
 - **Render hero as CSS `background-image`, not `<img>`**. Canvas's astro-hydration layer intercepts every `<img>` tag and runs it through a responsive-image processor that requires an `alternateWidths` query param. Plain CDN/file URLs don't carry that param, so the processor swallows the image. `background-image` on a `<div>` bypasses the processor.
-- **Body HTML: `dangerouslySetInnerHTML`, not `<FormattedText>`**. Same root cause — `FormattedText` wraps `<img>` tags inside the body. Plain `dangerouslySetInnerHTML` renders the body's HTML directly, with no Canvas processor in the middle.
+- **Body HTML: `dangerouslySetInnerHTML`, not `<FormattedText>`**. Same root cause — `FormattedText` wraps `<img>` tags inside the body. Plain `dangerouslySetInnerHTML` renders the body's HTML directly, with no Canvas processor in the middle. **Wrap that body in `@tailwindcss/typography`'s `prose` classes** (mandatory per Step 3) — the plugin, not hand-rolled utilities, owns paragraph/heading/list/link styling for the rendered HTML.
 - **Translate `public://` stream URIs to `/sites/default/files/`**. JSON:API sometimes returns the unresolved Drupal stream URI instead of the public path. The component does this translation before rendering.
 - **Forgiving matcher**. The editor may bind `slug` to Title, Path, or NID via Canvas's field-link chip — none of which is what the code expects literally. Try matchers in order: `path.alias` → case-insensitive `title` → numeric `drupal_internal__nid` → fuzzy `endsWith(/slug)`. Whatever the editor picks resolves correctly.
 - **Unwrap typed-field envelopes**. List/datetime fields arrive as `{value: "x"}` from JSON:API. Read `.value` before label lookup, otherwise `[OBJECT OBJECT]` shows up in the rendered output.
